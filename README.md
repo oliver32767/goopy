@@ -15,7 +15,7 @@ Once you have `virtualenv`:
 
 Now scrape the example keywords:
 
-    $ ./goo.py -v example-keywords.txt
+    $ ./goo.py -vf example-keywords.txt
 
 See the help message for usage:
 
