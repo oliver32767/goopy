@@ -172,7 +172,6 @@ def main():
 
     log.debug("sorting results")
 
-    data.sort(key=itemgetter(1), reverse=True)
     data = natsorted(data, itemgetter(1))
     data.reverse()
 
