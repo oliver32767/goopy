@@ -1,10 +1,11 @@
 #!/usr/bin/env python
 """
-Scrape the number of Google search results for keywords in FILE and sort by highest number of results
+Scrape the number of Google search results for given keywords
 
 Usage:
-  goo.py [-q|-v|-vv] (FILE) [-a] [--outfile=OUTFILE|-o OUTFILE] [--delim=DELIM|-d DELIM] [--wait=WAIT|-w WAIT] [--wait-fuzz=FUZZ|-z FUZZ]
-  goo.py -h | --help | --version
+  goo.py [-v|-vv|-q] [options] (KEYWORD...)
+  goo.py [-v|-vv|-q] [options] (-f FILE)
+  goo.py -h|--help|--version
 
 Arguments:
   FILE      input file containing keywords, one per line
@@ -14,16 +15,22 @@ Options:
   -h --help  display this help message
   -v         verbose mode (use -vv for debug output)
   -q         quiet mode (disables summary)
+  -y         dry run, no requests are made and no files are written
   -a         append output to OUTFILE instead of overwriting
-  -o --outfile OUTFILE    output file [default: ./output.txt]
+  -f --infile INFILE      input file. each line is considered a keyword
+  -o --outfile OUTFILE    output file. if not set, results will be written to the console
   -d --delim DELIM        delimiter [default: ,]
   -w --wait SECONDS       minimum wait before processing the next keyword [default: 5]
   -z --wait-fuzz SECONDS  add randomness to wait times [default: 5]
+  -t --template TEMPLATE  template string, substituting '%s' with the current keyword [default: %s]
+  -l --language LANG      language setting passed as ?hl=LANG query parameter [default: en]
+  -s --site DOMAIN        tld used for search url [default: com]
 
 """
 __author__ = 'obartley'
 
 import os
+import sys
 import random
 import time
 import logging
@@ -33,22 +40,29 @@ import urllib2
 import datetime
 import pprint
 
-
 from bs4 import BeautifulSoup
 from docopt import docopt
 from operator import itemgetter
 from collections import Counter
-
+from natsort import natsorted
+# settings globals
+# note: these are used as variables to contain arguments that have been validated!
+# some arguments are not validated and will not have corresponding settings globals!
+arguments = {}
 min_wait = 0    # seconds
 max_wait = 0    # seconds
 infile = ""
 outfile = ""
 outmode = 'w+'
 delim = ","
-arguments = {}
+template = ""
+lang = ""
+site = ""
+dry_run = False
 
-url_template = "https://www.google.com/search?q=%s"
+url_template = "https://www.google.%s/search?hl=%s&q=%s"
 non_numeric = re.compile(r'[^\d]+')
+numeric = re.compile(r'([0-9]+)')
 logging.basicConfig()
 log = logging.getLogger('goo.py')
 
@@ -85,12 +99,15 @@ def process(keyword, user_agent):
     """
     try:
         html = fetch_html(keyword, user_agent)
-        soup = BeautifulSoup(html, 'html5lib')
-        stats = soup.find(id='resultStats').contents[0]
-        stats = non_numeric.sub('', stats)
-        log.debug("resultStats=%s" % stats)
-        results = (keyword, stats)
-        return results
+        if not dry_run:
+            soup = BeautifulSoup(html, 'html5lib')
+            stats = soup.find(id='resultStats').contents[0]
+            stats = non_numeric.sub('', stats)
+            log.debug("resultStats=%s" % stats)
+            return keyword, stats
+        else:
+            log.debug("resultStats=-1")
+            return keyword, '-1'
     except Exception as e:
         if arguments['-v'] == 2:
             log.exception("'%s' could not be processed" % keyword)
@@ -103,11 +120,14 @@ def fetch_html(elem, user_agent):
     """
     Download the raw html of a search results page using the provided user agent string
     """
-    url = url_template % urllib.quote_plus(elem.encode('utf-8'))
+    search_term = template % elem
+    url = url_template % (arguments['--site'], arguments['--language'], urllib.quote_plus(search_term.encode('utf-8')))
     log.debug("fetching '%s' with user agent '%s'" % (url, user_agent))
-    req = urllib2.Request(url)
-    req.add_header("User-Agent", user_agent)
-    return urllib2.build_opener().open(req).read()
+    if not dry_run:
+        req = urllib2.Request(url)
+        req.add_header("User-Agent", user_agent)
+        return urllib2.build_opener().open(req).read()
+
 
 
 def do_wait():
@@ -116,7 +136,7 @@ def do_wait():
     """
     s = random.randint(min_wait, max_wait)
     log.debug("waiting for %d seconds..." % s)
-    for i in reversed(range(s)):
+    for i in range(s):
         time.sleep(1)
 
 
@@ -129,15 +149,18 @@ def elapsed(method):
         result = method(*args, **kw)
         end = int(round(time.time() * 1000))
         if not arguments['-q']:
-            print("total running time: %s" % datetime.timedelta(milliseconds=end - start))
+            sys.stderr.write("total running time: %s\n" % datetime.timedelta(milliseconds=end - start))
         return result
     return wrapper
 
 
 @elapsed
 def main():
-    with open(infile) as f:
-        data = [l.strip().decode('utf-8') for l in f.readlines()]
+    if infile:
+        with open(infile) as f:
+            data = [l.strip().decode('utf-8') for l in f.readlines()]
+    else:
+        data = arguments['KEYWORD']
 
     user_agents = UserAgents()
 
@@ -148,25 +171,34 @@ def main():
             do_wait()
 
     log.debug("sorting results")
-    data.sort(key=itemgetter(1), reverse=True)
 
-    try:
-        log.info("writing results to %s" % os.path.abspath(outfile))
-        with open(outfile, outmode) as f:
-            for result in data:
-                f.write(('%s\n' % delim.join(result)).encode('utf-8'))
-        if not arguments['-q']:
-            errors = Counter(elem[1] for elem in data)['-1']
-            print("processed %d keyword(s) with %d error(s)" % (len(data), errors))
-    except Exception as e:
-        log.error("console dump due to error writing '%s' (%s)" % (outfile, str(e)))
-        pp = pprint.PrettyPrinter()
-        pp.pprint(data)
+    data.sort(key=itemgetter(1), reverse=True)
+    data = natsorted(data, itemgetter(1))
+    data.reverse()
+
+    if outfile:
+        try:
+            log.info("writing results to %s" % os.path.abspath(outfile))
+            if not dry_run:
+                with open(outfile, outmode) as f:
+                    for result in data:
+                        f.write(('%s\n' % delim.join(result)).encode('utf-8'))
+        except Exception as e:
+            log.error("console dump due to error writing '%s' (%s)" % (outfile, str(e)))
+            pp = pprint.PrettyPrinter()
+            pp.pprint(data)
+    else:
+        for result in data:
+            print(delim.join(result)).encode('utf-8')
+
+    if not arguments['-q']:
+        errors = Counter(elem[1] for elem in data)['-1']
+        sys.stderr.write("processed %d keyword(s) with %d error(s)\n" % (len(data), errors))
 
 
 if __name__ == "__main__":
     # parse command line arguments and then call main()
-    arguments = docopt(__doc__, version='goo.py version 20131120')
+    arguments = docopt(__doc__, version='goo.py version 20131122')
 
     if arguments['-v'] == 2:
         log.setLevel(logging.DEBUG)
@@ -175,7 +207,9 @@ if __name__ == "__main__":
     elif arguments['-q']:
         log.setLevel(logging.CRITICAL)
 
-    log.debug("log level=%s" % str(log.getEffectiveLevel()))
+    if arguments['-v'] == 2:
+        pp = pprint.PrettyPrinter(stream=sys.stderr)
+        pp.pprint(arguments)
 
     min_wait = int(arguments['--wait'])
     if min_wait < 0:
@@ -186,23 +220,29 @@ if __name__ == "__main__":
     else:
         log.error("--wait-fuzz must be a positive value")
         exit(-1)
-    log.debug("min_cooldown=%d, max_cooldown=%d" % (min_wait, max_wait))
 
-    infile = arguments['FILE']
-    if not os.path.exists(infile):
-        log.error("'%s' does not exist!" % infile)
-        exit(-1)
+    if not arguments['KEYWORD']:
+        infile = arguments['--infile']
+        if not os.path.exists(infile):
+            log.error("'%s' does not exist!" % infile)
+            exit(-1)
     outfile = arguments['--outfile']
-    log.debug("infile: %s" % infile)
-    log.debug("outfile: %s" % outfile)
 
     delim = arguments['--delim']
-    if delim == '':
+    if not delim:
         log.error("--delim can't be an empty string!")
         exit(-1)
-    log.debug("delim='%s'" % delim)
+
     if arguments['-a']:
         outmode = 'a+'
-    log.debug("outmode='%s'" % outmode)
+
+    template = arguments['--template']
+    try:
+        template_test = template % 'keyword'
+    except TypeError as e:
+        log.error("--template must contain exactly one occurrence of '%s'")
+        exit(-1)
+
+    dry_run = arguments['-y']
 
     main()
